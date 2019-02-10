@@ -4,7 +4,7 @@ class RingBuffer
 public:
 	enum eRingBuffer
 	{
-		MAX_BUF_SIZE = 18000,
+		MAX_BUF_SIZE = 20000,
 	};
 	RingBuffer();
 	RingBuffer(int iBufferSize);

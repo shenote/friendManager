@@ -20,6 +20,9 @@ HRESULT Network::init()
 	_mFriendReqList.clear(); // 친구 요청 리스트 초기화
 	_mFriendList.clear();	 // 친구 리스트 초기화
 
+
+	LoadJSON();
+
 	_headerSize = sizeof(st_PACKET_HEADER);
 
 	WSADATA wsa;
@@ -148,7 +151,7 @@ void Network::update()
 				SOCKET sk = copyIter->second->socket;
 				if (FD_ISSET(sk, &fdReadSet))
 				{
-					char buf[1400] = "\0";
+					char buf[20000] = "\0";
 					int recvSize = recv(sk, buf, copyIter->second->recvQ.GetFreeSize(), 0);
 
 					if (recvSize == 0 || recvSize == SOCKET_ERROR)
@@ -162,16 +165,21 @@ void Network::update()
 					// 처리할게 있으면 다 처리함
 					while (copyIter->second->recvQ.GetUseSize() >= _headerSize)
 					{
+						char tempBuf[20000] = "\0";
+						copyIter->second->recvQ.Peek(tempBuf, recvSize);
+						st_PACKET_HEADER tempHeader = *(st_PACKET_HEADER*)&tempBuf;
+						int procPacketSize = tempHeader.wPayloadSize + _headerSize;
 						// 패킷 처리
-						switch ((RECV_CHECK)PacketProc(copyIter->second->recvQ.GetFrontBufferPtr(), recvSize, sk))
+						switch ((RECV_CHECK)PacketProc(tempBuf, recvSize, sk))
 						{
 						case RECV_CHECK::RECV_OK:
 							// 패킷을 정상적으로 처리 하였음. 다음 패킷이 남아 있는 체크
+							recvSize -= procPacketSize;
 							continue;
 							break;
 						case RECV_CHECK::RECV_MORE:
 							// 패킷을 더 받아야함
-							copyIter->second->recvQ.Enqueue(copyIter->second->recvQ.GetFrontBufferPtr(), recvSize);
+							//copyIter->second->recvQ.Enqueue(copyIter->second->recvQ.GetFrontBufferPtr(), recvSize);
 							break;
 						case RECV_CHECK::RECV_ERROR:
 							// 잘못된 데이터 유저 차단
@@ -194,15 +202,35 @@ void Network::update()
 				}
 
 				// 보낼께 있는가?
-				if (copyIter->second->sendQ.GetUseSize() == 0)
+				if (copyIter->second->sendQ.GetUseSize() < _headerSize)
 					continue;
+
+				// 헤더 복사
+				char tempSendBuf[20000] = "\0";
+				copyIter->second->sendQ.Peek(tempSendBuf, _headerSize);
+				st_PACKET_HEADER header = { 0, };
+				memcpy((char*)&header, tempSendBuf, _headerSize);
+
+				// 패킷의 페이로드 사이즈가 있는지 체크 부족하다면 더 받아야 한다.
+				if (copyIter->second->sendQ.GetUseSize() < header.wPayloadSize + _headerSize)
+				{
+					int a = 0;
+					continue;
+				}
+
+				//printf("sendQueue : %d\n", copyIter->second->sendQ.GetUseSize());
 
 				// 보낼 수 있는 상태 인가 ?
 				if (FD_ISSET(sk, &fdSendSet))
 				{
-					st_PACKET_HEADER * header = (st_PACKET_HEADER*)copyIter->second->sendQ.GetFrontBufferPtr();
 
-					int sendSize = send(sk, copyIter->second->sendQ.GetFrontBufferPtr(), _headerSize + header->wPayloadSize, 0);
+					int sendSizeGo = copyIter->second->sendQ.GetUseSize();
+					char sendBuf[20000] = "\0";
+					copyIter->second->sendQ.Peek(sendBuf, sendSizeGo);
+					st_PACKET_HEADER * headers = (st_PACKET_HEADER*)sendBuf;
+
+					int sendSize = send(sk, sendBuf, sendSizeGo, 0);
+					//printf("send : %d\n", sendSize);
 					copyIter->second->sendQ.MoveFront(sendSize);
 				}
 			}
@@ -292,6 +320,8 @@ int Network::PacketProc(char * buf_, unsigned int size_, UINT sk_)
 	// MovePtr
 	_mUserList[sk_]->recvQ.MoveFront(header.wPayloadSize + _headerSize);
 
+	_uiPPS++;
+
 	return RECV_CHECK::RECV_OK;
 }
 
@@ -369,12 +399,160 @@ BOOL Network::PacketTypeProc(WORD wMsgType_, char * buf_, UINT sk_)
 	case df_REQ_FRIEND_REMOVE:
 		bProcRet = Packet_ReqFriendRemove(buf_, sk_);
 		break;
-
+	case df_REQ_STRESS_ECHO:
+		bProcRet = Packet_StressTest(buf_, sk_);
+		break;
 	default:
 		bProcRet = false;
 		break;
 	}
 	return bProcRet;
+}
+
+void Network::SaveJSON()
+{
+
+	StringBuffer StringJSON;
+	Writer<StringBuffer, UTF16<>> writer(StringJSON);
+
+	writer.StartObject();	// {
+	writer.String(L"Account");
+	writer.StartArray();
+	// 계정 정보 저장
+	for (auto iter = _mAccountList.begin(); iter != _mAccountList.end(); ++iter)
+	{
+		writer.StartObject();
+		writer.String(L"AccountNo");
+		writer.Uint64(iter->first);
+		writer.String(L"Nickname");
+		writer.String(iter->second.nikName);
+		writer.EndObject();
+	}
+	writer.EndArray();
+
+	writer.String(L"Friend");
+	writer.StartArray();
+	// 친구 정보 저장
+	for (auto iter = _mFriendList.begin(); iter != _mFriendList.end(); ++iter)
+	{
+		writer.StartObject();
+		writer.String(L"friendFrom");
+		writer.Uint64(iter->first);
+		writer.String(L"friendTo");
+		writer.Uint64(iter->second);
+		writer.EndObject();
+	}
+	writer.EndArray();
+
+	writer.String(L"FriendRes");
+	writer.StartArray();
+	// 친구 요청 받은 
+	for (auto iter = _mFriendResList.begin(); iter != _mFriendResList.end(); ++iter)
+	{
+		writer.StartObject();
+		writer.String(L"friendResFrom");
+		writer.Uint64(iter->first);
+		writer.String(L"friendResTo");
+		writer.Uint64(iter->second);
+		writer.EndObject();
+	}
+	writer.EndArray();
+
+	writer.String(L"FriendReq");
+	writer.StartArray();
+	// 친구 요청 한
+	for (auto iter = _mFriendReqList.begin(); iter != _mFriendReqList.end(); ++iter)
+	{
+		writer.StartObject();
+		writer.String(L"friendReqFrom");
+		writer.Uint64(iter->first);
+		writer.String(L"friendReqTo");
+		writer.Uint64(iter->second);
+		writer.EndObject();
+	}
+	writer.EndArray();
+
+	writer.EndObject();		// }
+
+	const char * pjson = StringJSON.GetString();
+
+	FILE *fp;
+	fopen_s(&fp, "saveJSON.txt", "w");
+	fwrite(pjson, strlen(pjson), 1, fp);
+	fclose(fp);
+
+}
+
+void Network::LoadJSON()
+{
+	char buf[2048] = { 0, };
+	FILE *fp;
+	fopen_s(&fp, "saveJSON.txt", "r");
+	if (fp == NULL)
+		return;
+	int redn = fread(buf, sizeof(buf), 1, fp);
+	fclose(fp);
+
+	Document Doc;
+	Doc.Parse(buf);
+
+	UINT64 AccountNo;
+	WCHAR szNickname[dfNICK_MAX_LEN];
+	Value &AccountArray = Doc["Account"];
+	for (SizeType i = 0; i < AccountArray.Size(); i++)
+	{
+		Value &AccountObject = AccountArray[i];
+		AccountNo = AccountObject["AccountNo"].GetUint64();
+		UTF8toUTF16(AccountObject["Nickname"].GetString(), szNickname, dfNICK_MAX_LEN);
+		++g_uiUser;
+
+		st_ACCOUNT acut;
+		memcpy(acut.nikName, szNickname, dfNICK_MAX_LEN * 2);
+		UINT64 accountNo = AccountNo;
+		_mAccountList.insert(make_pair(accountNo, acut));
+	}
+
+	AccountArray = Doc["Friend"];
+	for (SizeType i = 0; i < AccountArray.Size(); i++)
+	{
+		Value &AccountObject = AccountArray[i];
+		
+		UINT64 fromNo = AccountObject["friendFrom"].GetUint64();
+		UINT64 toNo = AccountObject["friendTo"].GetUint64();
+
+		_mFriendList.insert(make_pair(fromNo, toNo));
+	}
+	
+	AccountArray = Doc["FriendRes"];
+	for (SizeType i = 0; i < AccountArray.Size(); i++)
+	{
+		Value &AccountObject = AccountArray[i];
+
+		UINT64 fromNo = AccountObject["friendResFrom"].GetUint64();
+		UINT64 toNo = AccountObject["friendResTo"].GetUint64();
+
+		_mFriendResList.insert(make_pair(fromNo, toNo));
+	}
+
+	AccountArray = Doc["FriendReq"];
+	for (SizeType i = 0; i < AccountArray.Size(); i++)
+	{
+		Value &AccountObject = AccountArray[i];
+
+		UINT64 fromNo = AccountObject["friendReqFrom"].GetUint64();
+		UINT64 toNo = AccountObject["friendReqTo"].GetUint64();
+
+		_mFriendReqList.insert(make_pair(fromNo, toNo));
+	}
+	int a = 0;
+}
+
+bool Network::UTF8toUTF16(const char * szText, WCHAR * szBuff, int iBuffLen)
+{
+	int iRe = MultiByteToWideChar(CP_UTF8, 0, szText, strlen(szText), szBuff, iBuffLen);
+	if (iRe < iBuffLen)
+		szBuff[iRe] = L'\0';
+	return true;
 }
 
 void Network::SendAll(char * buf, int size)
@@ -801,6 +979,28 @@ BOOL Network::Packet_ReqFriendRemove(char * buf, UINT sk)
 	_packetSz << header;
 
 	MakePacket_ResFriendRemove(&_packetSz, accountNo, bRet);
+	_mUserList[sk]->sendQ.Enqueue(_packetSz.GetBufferPtr(), _packetSz.GetDataSize());
+
+	return TRUE;
+}
+
+BOOL Network::Packet_StressTest(char * buf, UINT sk)
+{
+
+	_mUserList[sk]->recvQ;
+	WORD wSize = *(WORD*)buf;
+	WCHAR wchar[1024] = { 0, };
+	memcpy(wchar, buf + 2, wSize);
+	//printf("Stress Recv : %d\n", wSize);
+	//wprintf(L"%s\n", wchar);
+
+	st_PACKET_HEADER header = { 0, };
+	header.byCode = dfPACKET_CODE;
+	header.wMsgType = df_RES_STRESS_ECHO;
+	header.wPayloadSize = wSize + sizeof(WORD);
+	_packetSz << header;
+	_packetSz << wSize;
+	_packetSz << wchar;
 	_mUserList[sk]->sendQ.Enqueue(_packetSz.GetBufferPtr(), _packetSz.GetDataSize());
 
 	return TRUE;

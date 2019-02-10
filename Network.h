@@ -46,6 +46,11 @@ public:
 	BOOL		CheckSum(int checkVal_, WORD wMsgType_, int payLoadSize_, char * payLoadBuf_);
 	BOOL		PacketTypeProc(WORD wMsgType_, char * buf_, UINT sk_);
 
+	// JSON 저장
+	void		SaveJSON();
+	void		LoadJSON();
+	bool		UTF8toUTF16(const char * szText, WCHAR * szBuff, int iBuffLen);
+
 	// 패킷 Proc 함수
 	void		SendAll(char * buf, int size);
 	void		SendOther(char * buf, int size, UINT sk);
@@ -59,7 +64,9 @@ public:
 	BOOL		Packet_ReqFriendDeny(char * buf, UINT sk);
 	BOOL		Packet_ReqFriendList(char * buf, UINT sk);
 	BOOL		Packet_ReqFriendRemove(char * buf, UINT sk);
+	BOOL		Packet_StressTest(char * buf, UINT sk);
 
+	UINT64						_uiPPS;
 private:
 
 	BOOL						_bConnect;

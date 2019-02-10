@@ -288,7 +288,7 @@ void MakePacket_ResFriendAgree(cPacketSerialz * packetSz, UINT64 friendAccountNo
 	st_PACKET_HEADER header;
 	header.byCode = dfPACKET_CODE;
 	header.wMsgType = df_RES_FRIEND_AGREE;
-	header.wPayloadSize = sizeof(st_PACKET_HEADER) + sizeof(UINT64) + sizeof(BYTE);
+	header.wPayloadSize = sizeof(UINT64) + sizeof(BYTE);
 
 	char * buf = packetSz->GetBufferPtr();
 	memcpy(buf, (char*)&header, sizeof(st_PACKET_HEADER));
@@ -301,7 +301,7 @@ void MakePacket_ResFriendDeny(cPacketSerialz * packetSz, UINT64 friendAccountNo,
 	st_PACKET_HEADER header;
 	header.byCode = dfPACKET_CODE;
 	header.wMsgType = df_RES_FRIEND_DENY;
-	header.wPayloadSize = sizeof(st_PACKET_HEADER) + sizeof(UINT64) + sizeof(BYTE);
+	header.wPayloadSize = sizeof(UINT64) + sizeof(BYTE);
 
 	char * buf = packetSz->GetBufferPtr();
 	memcpy(buf, (char*)&header, sizeof(st_PACKET_HEADER));
@@ -327,7 +327,7 @@ void MakePacket_ResFriendRemove(cPacketSerialz * packetSz, UINT64 friendAccountN
 	st_PACKET_HEADER header;
 	header.byCode = dfPACKET_CODE;
 	header.wMsgType = df_RES_FRIEND_REMOVE;
-	header.wPayloadSize = sizeof(st_PACKET_HEADER) + sizeof(UINT64) + sizeof(BYTE);
+	header.wPayloadSize = sizeof(UINT64) + sizeof(BYTE);
 
 	char * buf = packetSz->GetBufferPtr();
 	memcpy(buf, (char*)&header, sizeof(st_PACKET_HEADER));
