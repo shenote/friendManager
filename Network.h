@@ -37,7 +37,7 @@ public:
 
 	BOOL		DomaionToIP(const WCHAR *szDomain, IN_ADDR *pAddr);
 	BOOL		isConnect() { return _bConnect; }
-	void		Accept();
+	BOOL		Accept();
 	int			PacketProc(char * buf_, unsigned int size_, UINT sk_);
 	BOOL		DeleteUser(UINT sk_);
 	UINT		GetConnectCount() { return _mUserList.size(); }
@@ -82,6 +82,7 @@ private:
 	// B->A
 	multimap<UINT64, UINT64>	_mFriendList;
 	UINT64						_ui64LoginNo;
+	UINT64						_ui64UserTable[64];
 
 };
 

@@ -52,7 +52,7 @@ int main()
 			printf("PPS : %d\n", g_network._uiPPS);
 			g_network._uiPPS = 0;
 		}
-		KeyUpdate();
+		//KeyUpdate();
 	}
 
 }

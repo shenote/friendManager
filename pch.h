@@ -17,12 +17,19 @@
 #include <iostream>
 #include <Windows.h>
 
+#include "rapidjson/document.h"
+#include "rapidjson/writer.h"
+#include "rapidjson/stringbuffer.h"
+
+using namespace rapidjson;
+
 using namespace std;
 
 // lib
 #include "RingBuffer.h"
 #include "PacketDefine.h"
 #include "cPacketSerialz.h"
+
 
 #include "MakePacket.h"
 

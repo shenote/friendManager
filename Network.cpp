@@ -10,6 +10,20 @@ Network::~Network()
 {
 }
 
+BOOL Network::DomaionToIP(const WCHAR *szDomain, IN_ADDR *pAddr)
+{
+	ADDRINFOW * pAddrInfo;
+	SOCKADDR_IN * pSockAddr;
+	if (GetAddrInfo(szDomain, L"0", NULL, &pAddrInfo) != 0)
+	{
+		return FALSE;
+	}
+	pSockAddr = (SOCKADDR_IN*)pAddrInfo->ai_addr;
+	*pAddr = pSockAddr->sin_addr;
+	FreeAddrInfo(pAddrInfo);
+	return TRUE;
+}
+
 HRESULT Network::init()
 {
 	_bConnect = false;		 // 서버 바인딩 성공 여부
@@ -19,7 +33,7 @@ HRESULT Network::init()
 	_packetSz.Clear();		 // 직렬화 초기화
 	_mFriendReqList.clear(); // 친구 요청 리스트 초기화
 	_mFriendList.clear();	 // 친구 리스트 초기화
-
+	memset(_ui64UserTable, 0, sizeof(_ui64UserTable));
 
 	LoadJSON();
 
@@ -85,176 +99,10 @@ void Network::release()
 	WSACleanup();
 }
 
-void Network::update()
+
+BOOL Network::Accept()
 {
-	if (!_bConnect)
-		return;
-
-	// accept
-	Accept();
-
-	// user recv, send check
-	if (_mUserList.empty())
-		return;
-
-	// 1명이상 있을때 들어옴
-
-	FD_SET fdReadSet, fdSendSet;
-	FD_ZERO(&fdReadSet);
-	FD_ZERO(&fdSendSet);
-	
-	// Session 소켓 셋팅 만약 클라이언트가 있다면 셋팅을 해놓는다. 사이즈가 64이상이면 루프 한번 더 돈다.
-	int userCnt = 0;
-	auto iter = _mUserList.begin();
-	while (true)
-	{
-		// 끝 확인 후 종료
-		if (iter == _mUserList.end())
-		{
-			iter = _mUserList.begin();
-			userCnt = 0;
-			break;
-		}
-
-		for (;iter != _mUserList.end(); ++iter)
-		{
-			// fd셋의 등록 갯수 초과 임으로 다시 한번 돌아야함.
-			FD_SET(iter->second->socket, &fdReadSet);
-			FD_SET(iter->second->socket, &fdSendSet);
-			userCnt++;
-			if (userCnt > 63)
-			{
-				// 포문 강제 종료
-				break;
-			}
-		}
-
-		// Read & Send
-		timeval tv;
-		tv.tv_sec = 0;
-		tv.tv_usec = 0;
-
-		// 읽을게 있는지? 등록되어 있는 유저중 몇명의 유저들께 들어왔다.
-		// 샌드는 따로 
-		int selectRet = select(NULL, &fdReadSet, &fdSendSet, NULL, &tv);
-		if (selectRet > 0)
-		{
-			// 유저를 찾아서 검사 한다.
-
-			for (auto userIter = _mUserList.begin(); userIter != _mUserList.end();)
-			{
-				// 유저가 중간에 나갔을때 다음 이터가 지워짐으로 그걸 방지하기 위함
-				auto copyIter = userIter;
-				userIter++;
-
-				// 패킷 처리
-				SOCKET sk = copyIter->second->socket;
-				if (FD_ISSET(sk, &fdReadSet))
-				{
-					char buf[20000] = "\0";
-					int recvSize = recv(sk, buf, copyIter->second->recvQ.GetFreeSize(), 0);
-
-					if (recvSize == 0 || recvSize == SOCKET_ERROR)
-					{
-						printf("DISCONNECT : %d\n", sk);
-						DeleteUser(sk);
-						continue;
-					}
-					copyIter->second->recvQ.Enqueue(buf, recvSize);
-
-					// 처리할게 있으면 다 처리함
-					while (copyIter->second->recvQ.GetUseSize() >= _headerSize)
-					{
-						char tempBuf[20000] = "\0";
-						copyIter->second->recvQ.Peek(tempBuf, recvSize);
-						st_PACKET_HEADER tempHeader = *(st_PACKET_HEADER*)&tempBuf;
-						int procPacketSize = tempHeader.wPayloadSize + _headerSize;
-						// 패킷 처리
-						switch ((RECV_CHECK)PacketProc(tempBuf, recvSize, sk))
-						{
-						case RECV_CHECK::RECV_OK:
-							// 패킷을 정상적으로 처리 하였음. 다음 패킷이 남아 있는 체크
-							recvSize -= procPacketSize;
-							continue;
-							break;
-						case RECV_CHECK::RECV_MORE:
-							// 패킷을 더 받아야함
-							//copyIter->second->recvQ.Enqueue(copyIter->second->recvQ.GetFrontBufferPtr(), recvSize);
-							break;
-						case RECV_CHECK::RECV_ERROR:
-							// 잘못된 데이터 유저 차단
-
-							// 보낼 수 있는 상태 인가 ? 종료 
-							if (FD_ISSET(sk, &fdSendSet))
-							{
-								if (copyIter->second->sendQ.GetUseSize() != 0)
-									send(sk, copyIter->second->sendQ.GetFrontBufferPtr(), copyIter->second->sendQ.GetUseSize(), 0);
-							}
-							if (DeleteUser(sk) == false)
-								printf("지워지지 않은 유저가 있습니다. %d\n", sk);
-
-							return;
-						default:
-							printf("잘못된 패킷 처리가 있습니다. recv %d sk %d\n", recvSize, sk);
-							return;
-						}
-					}
-				}
-
-				// 보낼께 있는가?
-				if (copyIter->second->sendQ.GetUseSize() < _headerSize)
-					continue;
-
-				// 헤더 복사
-				char tempSendBuf[20000] = "\0";
-				copyIter->second->sendQ.Peek(tempSendBuf, _headerSize);
-				st_PACKET_HEADER header = { 0, };
-				memcpy((char*)&header, tempSendBuf, _headerSize);
-
-				// 패킷의 페이로드 사이즈가 있는지 체크 부족하다면 더 받아야 한다.
-				if (copyIter->second->sendQ.GetUseSize() < header.wPayloadSize + _headerSize)
-				{
-					int a = 0;
-					continue;
-				}
-
-				//printf("sendQueue : %d\n", copyIter->second->sendQ.GetUseSize());
-
-				// 보낼 수 있는 상태 인가 ?
-				if (FD_ISSET(sk, &fdSendSet))
-				{
-
-					int sendSizeGo = copyIter->second->sendQ.GetUseSize();
-					char sendBuf[20000] = "\0";
-					copyIter->second->sendQ.Peek(sendBuf, sendSizeGo);
-					st_PACKET_HEADER * headers = (st_PACKET_HEADER*)sendBuf;
-
-					int sendSize = send(sk, sendBuf, sendSizeGo, 0);
-					//printf("send : %d\n", sendSize);
-					copyIter->second->sendQ.MoveFront(sendSize);
-				}
-			}
-		}
-	}
-	
-}
-
-BOOL Network::DomaionToIP(const WCHAR *szDomain, IN_ADDR *pAddr)
-{
-	ADDRINFOW * pAddrInfo;
-	SOCKADDR_IN * pSockAddr;
-	if (GetAddrInfo(szDomain, L"0", NULL, &pAddrInfo) != 0)
-	{
-		return FALSE;
-	}
-	pSockAddr = (SOCKADDR_IN*)pAddrInfo->ai_addr;
-	*pAddr = pSockAddr->sin_addr;
-	FreeAddrInfo(pAddrInfo);
-	return TRUE;
-}
-
-void Network::Accept()
-{
+	BOOL bRet = FALSE;
 	FD_SET fdReadSet;
 	FD_ZERO(&fdReadSet);
 
@@ -263,7 +111,6 @@ void Network::Accept()
 	timeval tv;
 	tv.tv_sec = 0;
 	tv.tv_usec = 0;
-	
 	// accept
 	int selectRet = select(NULL, &fdReadSet, NULL, NULL, &tv);
 	if (selectRet > 0)
@@ -277,18 +124,171 @@ void Network::Accept()
 			int clientLen = sizeof(sockAddr);
 			SOCKET client = accept(_listenSocket, (SOCKADDR*)&sockAddr, &clientLen);
 			if (client == INVALID_SOCKET)
-			{
-				int a = 0;
-			}
+				printf("INVALID_SOCKET\n");
+
 			// 서버에 유저의 정보를 담는다. 
 			st_USER * user = new st_USER;
 			user->socket = client;
 			user->sockAddr = sockAddr;
 			user->isLogin = FALSE;
 			_mUserList.insert(make_pair(client, user));
+
 			printf("Accept - ip %s port %d\n", inet_ntoa(sockAddr.sin_addr), sockAddr.sin_port);
+			bRet = TRUE;
 		}
 	}
+	return bRet;
+}
+
+
+void Network::update()
+{
+	if (!_bConnect)
+		return;
+	
+	Accept();
+
+	if (_mUserList.empty())
+		return;
+
+	FD_SET fdReadSet, fdSendSet;
+
+	// Read & Send
+	timeval tv;
+	tv.tv_sec = 0;
+	tv.tv_usec = 0;
+	
+	// Session 소켓 셋팅 만약 클라이언트가 있다면 셋팅을 해놓는다. 사이즈가 64이상이면 루프 한번 더 돈다.
+	int userCnt = 0;
+	auto iter = _mUserList.begin();
+
+	while (true)
+	{
+		FD_ZERO(&fdReadSet);
+		FD_ZERO(&fdSendSet);
+
+		// 이터의 끝 확인 후 루프 탈출
+		if (iter == _mUserList.end())
+		{
+			userCnt = 0;
+			break;
+		}
+
+		int iFduserCnt = 0;	// 현재 루프 돌려야 될 카운트 == FD 유저 수
+		for (;iter != _mUserList.end(); ++iter)
+		{
+			// 유저 테이블 매핑
+			if (userCnt == 0)
+				memset(_ui64UserTable, 0, sizeof(_ui64UserTable));
+
+			// fd셋의 등록 갯수 초과 임으로 다시 한번 돌아야함.
+			FD_SET(iter->second->socket, &fdReadSet);
+			FD_SET(iter->second->socket, &fdSendSet);
+			_ui64UserTable[userCnt] = iter->first;
+			userCnt++;
+			iFduserCnt++;
+			if (userCnt > 64)
+			{
+				// FD 샐릭트의 경우 한번에 64명만 받을 수 있음
+				userCnt = 0;
+				break;
+			}
+		}
+
+		// 읽을게 있는지? 등록되어 있는 유저중 몇명의 유저들께 들어왔다.
+		// 샌드는 따로 
+		int selectRet = select(NULL, &fdReadSet, &fdSendSet, NULL, &tv);
+		if (selectRet > 0)
+		{
+			// 유저를 찾아서 검사 한다.
+			// 이게 느리다. 위에서 1500명을 검사를 하는대, 여기서 다시 맨 끝에 있는 녀석이면 존나게 뒤자너
+			for (int i = 0; i < iFduserCnt; ++i)
+			{
+				st_USER * userIter = _mUserList[_ui64UserTable[i]];
+
+				// 유저의 패킷 처리 프로시저를 빠져나와야할 경우
+				bool bUserPacketOutProc = false;
+
+				// 패킷 처리
+				SOCKET sk = userIter->socket;
+				if (FD_ISSET(sk, &fdReadSet))
+				{
+					// 클라에서는 하나주고 하나 받고, 받을 공간이 충분한데, 브로큰 때문에 못 받았다면.. 다음에 다시 받을 수 있지 않나?
+					int recvSize = recv(sk, userIter->recvQ.GetRearBufferPtr(), userIter->recvQ.GetNotBrokenPutSize(), 0);
+
+					userIter->recvQ.MoveRear(recvSize);
+
+					if (recvSize == 0 || recvSize == SOCKET_ERROR)
+					{
+						DeleteUser(sk);
+						continue;
+					}
+
+					// 처리할게 있으면 다 처리함
+					while (userIter->recvQ.GetUseSize() >= _headerSize)
+					{
+						char tempBuf[18000] = "\0";
+						userIter->recvQ.Peek(tempBuf, userIter->recvQ.GetUseSize());
+
+						// 패킷 처리
+						switch ((RECV_CHECK)PacketProc(tempBuf, userIter->recvQ.GetUseSize(), sk))
+						{
+						case RECV_CHECK::RECV_OK:
+							// 패킷을 정상적으로 처리 하였음. 다음 패킷이 남아 있는 체크
+							continue;
+							break;
+						case RECV_CHECK::RECV_MORE:
+							// 패킷을 더 받아야함
+							bUserPacketOutProc = true;
+							break;
+						case RECV_CHECK::RECV_ERROR:
+							// 잘못된 데이터 유저 차단
+							if (DeleteUser(sk) == false)
+								printf("지워지지 않은 유저가 있습니다. %d\n", sk);
+							bUserPacketOutProc = true;
+							break;
+						default:
+							printf("잘못된 패킷 처리가 있습니다. recv %d sk %d\n", recvSize, sk);
+							bUserPacketOutProc = true;
+							break;
+						}
+
+						if (bUserPacketOutProc)
+							break;
+					}
+				}
+
+				if (bUserPacketOutProc)
+					continue;
+
+				// 보낼께 있는가?
+				if (userIter->sendQ.GetUseSize() < _headerSize)
+					continue;
+
+				// 헤더 복사
+				st_PACKET_HEADER header = { 0, };
+				userIter->sendQ.Peek((char*)&header, _headerSize);
+
+				// 패킷의 페이로드 사이즈가 있는지 체크 부족하다면 더 받아야 한다.
+				if (userIter->sendQ.GetUseSize() < header.wPayloadSize + _headerSize)
+					continue;
+
+				// 보낼 수 있는 상태 인가 ?
+				if (FD_ISSET(sk, &fdSendSet))
+				{
+					// 현재 클라쪽이 미완성된 패킷을 보내게 되면 처리를 못함
+					char sendBuf[1400] = "\0";
+					int sendBufSize = userIter->sendQ.GetUseSize();
+					userIter->sendQ.Peek(sendBuf, sendBufSize);
+
+					int sendSize = send(sk, sendBuf, sendBufSize, 0);
+
+					userIter->sendQ.MoveFront(sendSize);
+				}
+			}
+		}
+	}
+	
 }
 
 int Network::PacketProc(char * buf_, unsigned int size_, UINT sk_)
@@ -298,15 +298,17 @@ int Network::PacketProc(char * buf_, unsigned int size_, UINT sk_)
 		return RECV_CHECK::RECV_MORE;
 
 	// 헤더 복사
-	st_PACKET_HEADER header = { 0, };
-	memcpy((char*)&header, buf_, _headerSize);
+	st_PACKET_HEADER header = *(st_PACKET_HEADER*)buf_;
 
 	// 패킷의 첫 바이트가 0x89인가? 위변조 체크
 	if (header.byCode != 0x89)
 		return RECV_CHECK::RECV_ERROR;
 
 	// 패킷의 페이로드 사이즈가 있는지 체크 부족하다면 더 받아야 한다.
-	if (header.wPayloadSize > size_)
+	// 헤더 사이즈 recv 받은 사이즈는 recvQueue에 처리해야할 데이터 사이즈의 총합만큼 있을때만 다음을 진행해야 한다.
+	// 헤더사이즈 위에서 체크했다고 뺏따가 recv 사이즈가 900인데, 페이로드가 897이었다. 이러면 아래는 거짓이 됨으로 패킷 처리를 하는데
+	// 이렇게 되면 에러가 된다. 헤더사이즈도 꼭 넣자
+	if (header.wPayloadSize + _headerSize > size_)
 		return RECV_CHECK::RECV_MORE;
 
 	//// 체크썸 체크 체크섬 값,메시지 타입, 페이로드 크기, 버퍼
@@ -314,7 +316,7 @@ int Network::PacketProc(char * buf_, unsigned int size_, UINT sk_)
 	//	return RECV_CHECK::RECV_ERROR;
 
 	// 모든 조건이 만족함 패킷을 처리 하면 됨.
-	if (PacketTypeProc(header.wMsgType, buf_ + _headerSize, sk_) == false)
+	if (PacketTypeProc(header.wMsgType, buf_, sk_) == false)
 		return RECV_CHECK::RECV_ERROR;
 
 	// MovePtr
@@ -325,6 +327,55 @@ int Network::PacketProc(char * buf_, unsigned int size_, UINT sk_)
 	return RECV_CHECK::RECV_OK;
 }
 
+BOOL Network::PacketTypeProc(WORD wMsgType_, char * buf_, UINT sk_)
+{
+	// 직렬화 초기화
+	_packetSz.Clear();
+
+	BOOL bProcRet = true;
+	// 패킷
+	switch (wMsgType_)
+	{
+	case df_REQ_ACCOUNT_ADD:
+		bProcRet = Packet_ReqAddAccount(buf_ + _headerSize, sk_);
+		break;
+	case df_REQ_LOGIN:
+		bProcRet = Packet_ReqLogin(buf_ + _headerSize, sk_);
+		break;
+	case df_REQ_ACCOUNT_LIST:
+		bProcRet = Packet_ReqAccountList(buf_ + _headerSize, sk_);
+		break;
+	case df_REQ_FRIEND_REQUEST:
+		bProcRet = Packet_ReqFriendRequest(buf_ + _headerSize, sk_);
+		break;
+	case df_REQ_FRIEND_REPLY_LIST:
+		bProcRet = Packet_ReqFriendReplyList(buf_ + _headerSize, sk_);
+		break;
+	case df_REQ_FRIEND_REQUEST_LIST:
+		bProcRet = Packet_ReqFriendRequestList(buf_ + _headerSize, sk_);
+		break;
+	case df_REQ_FRIEND_AGREE:
+		bProcRet = Packet_ResFriendAgree(buf_ + _headerSize, sk_);
+		break;
+	case df_REQ_FRIEND_DENY:
+		bProcRet = Packet_ReqFriendDeny(buf_ + _headerSize, sk_);
+		break;
+	case df_REQ_FRIEND_LIST:
+		bProcRet = Packet_ReqFriendList(buf_ + _headerSize, sk_);
+		break;
+	case df_REQ_FRIEND_REMOVE:
+		bProcRet = Packet_ReqFriendRemove(buf_ + _headerSize, sk_);
+		break;
+	case df_REQ_STRESS_ECHO:
+		bProcRet = Packet_StressTest(buf_, sk_);
+		break;
+	default:
+		bProcRet = false;
+		break;
+	}
+	return bProcRet;
+}
+
 
 BOOL Network::DeleteUser(UINT sk_)
 {
@@ -332,10 +383,10 @@ BOOL Network::DeleteUser(UINT sk_)
 	{
 		if (iter->first == sk_)
 		{
+			printf("Disconnected - ip %s port %d\n", inet_ntoa(_mUserList[sk_]->sockAddr.sin_addr), _mUserList[sk_]->sockAddr.sin_port);
 			closesocket(sk_);
 			delete _mUserList[sk_];
 			_mUserList.erase(sk_);
-			printf("Free Done : %d\n", sk_);
 			return TRUE;
 		}
 	}
@@ -358,55 +409,6 @@ BOOL Network::CheckSum(int checkVal_, WORD wMsgType_, int payLoadSize_, char * p
 		return TRUE;
 
 	return FALSE;
-}
-
-BOOL Network::PacketTypeProc(WORD wMsgType_, char * buf_, UINT sk_)
-{
-	// 직렬화 초기화
-	_packetSz.Clear();
-
-	BOOL bProcRet = true;
-	// 패킷
-	switch (wMsgType_)
-	{
-	case df_REQ_ACCOUNT_ADD:
-		bProcRet = Packet_ReqAddAccount(buf_, sk_);
-		break;
-	case df_REQ_LOGIN:
-		bProcRet = Packet_ReqLogin(buf_, sk_);
-		break;
-	case df_REQ_ACCOUNT_LIST:
-		bProcRet = Packet_ReqAccountList(buf_, sk_);
-		break;
-	case df_REQ_FRIEND_REQUEST:
-		bProcRet = Packet_ReqFriendRequest(buf_, sk_);
-		break;
-	case df_REQ_FRIEND_REPLY_LIST:
-		bProcRet = Packet_ReqFriendReplyList(buf_, sk_);
-		break;
-	case df_REQ_FRIEND_REQUEST_LIST:
-		bProcRet = Packet_ReqFriendRequestList(buf_, sk_);
-		break;
-	case df_REQ_FRIEND_AGREE:
-		bProcRet = Packet_ResFriendAgree(buf_, sk_);
-		break;
-	case df_REQ_FRIEND_DENY:
-		bProcRet = Packet_ReqFriendDeny(buf_, sk_);
-		break;
-	case df_REQ_FRIEND_LIST:
-		bProcRet = Packet_ReqFriendList(buf_, sk_);
-		break;
-	case df_REQ_FRIEND_REMOVE:
-		bProcRet = Packet_ReqFriendRemove(buf_, sk_);
-		break;
-	case df_REQ_STRESS_ECHO:
-		bProcRet = Packet_StressTest(buf_, sk_);
-		break;
-	default:
-		bProcRet = false;
-		break;
-	}
-	return bProcRet;
 }
 
 void Network::SaveJSON()
@@ -493,6 +495,7 @@ void Network::LoadJSON()
 	int redn = fread(buf, sizeof(buf), 1, fp);
 	fclose(fp);
 
+
 	Document Doc;
 	Doc.Parse(buf);
 
@@ -571,6 +574,12 @@ void Network::SendOther(char * buf, int size, UINT sk)
 		_mUserList[iter->first]->sendQ.Enqueue(buf, size);
 	}
 }
+
+//------------------------------------------------------------------------
+//
+// Content ------------------------------------------------------
+//
+//------------------------------------------------------------------------
 
 //
 // 회원가입
@@ -986,22 +995,12 @@ BOOL Network::Packet_ReqFriendRemove(char * buf, UINT sk)
 
 BOOL Network::Packet_StressTest(char * buf, UINT sk)
 {
+	st_PACKET_HEADER * tHeader = (st_PACKET_HEADER*)buf;
+	tHeader->wMsgType = df_RES_STRESS_ECHO;
 
-	_mUserList[sk]->recvQ;
-	WORD wSize = *(WORD*)buf;
-	WCHAR wchar[1024] = { 0, };
-	memcpy(wchar, buf + 2, wSize);
-	//printf("Stress Recv : %d\n", wSize);
-	//wprintf(L"%s\n", wchar);
-
-	st_PACKET_HEADER header = { 0, };
-	header.byCode = dfPACKET_CODE;
-	header.wMsgType = df_RES_STRESS_ECHO;
-	header.wPayloadSize = wSize + sizeof(WORD);
-	_packetSz << header;
-	_packetSz << wSize;
-	_packetSz << wchar;
-	_mUserList[sk]->sendQ.Enqueue(_packetSz.GetBufferPtr(), _packetSz.GetDataSize());
+	_mUserList[sk]->sendQ.Enqueue(buf, _headerSize + tHeader->wPayloadSize);
 
 	return TRUE;
+
 }
+
